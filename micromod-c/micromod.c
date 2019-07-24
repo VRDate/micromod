@@ -1,12 +1,12 @@
 
 #include "micromod.h"
 
-/* fast protracker replay version 20161204 (c)2016 mumart@gmail.com */
-
 #define MAX_CHANNELS 16
 #define FP_SHIFT 14
 #define FP_ONE   16384
 #define FP_MASK  16383
+
+static const char *MICROMOD_VERSION = "Micromod Protracker replay 20180625 (c)mumart@gmail.com";
 
 struct note {
 	unsigned short key;
@@ -23,7 +23,7 @@ struct channel {
 	struct note note;
 	unsigned short period, porta_period;
 	unsigned long sample_offset, sample_idx, step;
-	unsigned char volume, panning, fine_tune, ampl;
+	unsigned char volume, panning, fine_tune, ampl, mute;
 	unsigned char id, instrument, assigned, porta_speed, pl_row, fx_count;
 	unsigned char vibrato_type, vibrato_phase, vibrato_speed, vibrato_depth;
 	unsigned char tremolo_type, tremolo_phase, tremolo_speed, tremolo_depth;
@@ -50,7 +50,7 @@ static unsigned char *pattern_data, *sequence;
 static long song_length, restart, num_patterns, num_channels;
 static struct instrument instruments[ 32 ];
 
-static long sample_rate, c2_rate, gain, tick_len, tick_offset;
+static long sample_rate, gain, c2_rate, tick_len, tick_offset;
 static long pattern, break_pattern, row, next_row, tick;
 static long speed, pl_count, pl_channel, random_seed;
 
@@ -109,7 +109,7 @@ static void update_frequency( struct channel *chan ) {
 	volume = chan->volume + chan->tremolo_add;
 	if( volume > 64 ) volume = 64;
 	if( volume < 0 ) volume = 0;
-	chan->ampl = volume * gain;
+	chan->ampl = ( volume * gain ) >> 5;
 }
 
 static void tone_portamento( struct channel *chan ) {
@@ -218,9 +218,9 @@ static void channel_row( struct channel *chan ) {
 			if( ( param & 0x0F ) > 0 ) chan->tremolo_depth = param & 0xF;
 			tremolo( chan );
 			break;
-		case 0x8: /* Set Panning. Not for 4-channel ProTracker. */
+		case 0x8: /* Set Panning (0-127). Not for 4-channel Protracker. */
 			if( num_channels != 4 ) {
-				chan->panning = ( param < 128 ) ? ( param << 1 ) : 255;
+				chan->panning = ( param < 128 ) ? param : 127;
 			}
 			break;
 		case 0xB: /* Pattern Jump.*/
@@ -355,7 +355,7 @@ static void channel_tick( struct channel *chan ) {
 	if( effect > 0 ) update_frequency( chan );
 }
 
-static long sequence_row() {
+static long sequence_row( void ) {
 	long song_end, chan_idx, pat_offset;
 	long effect, param;
 	struct note *note;
@@ -396,7 +396,7 @@ static long sequence_row() {
 	return song_end;
 }
 
-static long sequence_tick() {
+static long sequence_tick( void ) {
 	long song_end, chan_idx;
 	song_end = 0;
 	if( --tick <= 0 ) {
@@ -410,20 +410,17 @@ static long sequence_tick() {
 }
 
 static void resample( struct channel *chan, short *buf, long offset, long count ) {
-	long sample, ampl, lamp, ramp;
-	unsigned long buf_idx, buf_end, sidx, step, inst, llen, lep1, epos;
-	signed char *sdat;
-	ampl = buf ? chan->ampl : 0;
-	ramp = ampl * chan->panning;
-	lamp = ampl * ( 255 - chan->panning );
-	sidx = chan->sample_idx;
-	step = chan->step;
-	inst = chan->instrument;
-	llen = instruments[ inst ].loop_length;
-	lep1 = instruments[ inst ].loop_start + llen;
-	sdat = instruments[ inst ].sample_data;
-	buf_idx = offset << 1;
-	buf_end = ( offset + count ) << 1;
+	unsigned long epos;
+	unsigned long buf_idx = offset << 1;
+	unsigned long buf_end = ( offset + count ) << 1;
+	unsigned long sidx = chan->sample_idx;
+	unsigned long step = chan->step;
+	unsigned long llen = instruments[ chan->instrument ].loop_length;
+	unsigned long lep1 = instruments[ chan->instrument ].loop_start + llen;
+	signed char *sdat = instruments[ chan->instrument ].sample_data;
+	short ampl = buf && !chan->mute ? chan->ampl : 0;
+	short lamp = ampl * ( 127 - chan->panning ) >> 5;
+	short ramp = ampl * chan->panning >> 5;
 	while( buf_idx < buf_end ) {
 		if( sidx >= lep1 ) {
 			/* Handle loop. */
@@ -437,22 +434,42 @@ static void resample( struct channel *chan, short *buf, long offset, long count 
 		}
 		/* Calculate sample position at end. */
 		epos = sidx + ( ( buf_end - buf_idx ) >> 1 ) * step;
-		if( ampl <= 0 ) {
-			/* No need to mix. */
+		/* Most of the cpu time is spent here. */
+		if( lamp || ramp ) {
+			/* Only mix to end of current loop. */
+			if( epos > lep1 ) epos = lep1;
+			if( lamp && ramp ) {
+				/* Mix both channels. */
+				while( sidx < epos ) {
+					ampl = sdat[ sidx >> FP_SHIFT ];
+					buf[ buf_idx++ ] += ampl * lamp >> 2;
+					buf[ buf_idx++ ] += ampl * ramp >> 2;
+					sidx += step;
+				}
+			} else {
+				/* Only mix one channel. */
+				if( ramp ) buf_idx++;
+				while( sidx < epos ) {
+					buf[ buf_idx ] += sdat[ sidx >> FP_SHIFT ] * ampl;
+					buf_idx += 2;
+					sidx += step;
+				}
+				buf_idx &= -2;
+			}
+		} else {
+			/* No need to mix.*/
+			buf_idx = buf_end;
 			sidx = epos;
-			break;
-		}
-		/* Only mix to end of current loop. */
-		if( epos > lep1 ) epos = lep1;
-		while( sidx < epos ) {
-			/* Most of the cpu time is spent in here. */
-			sample = sdat[ sidx >> FP_SHIFT ];
-			buf[ buf_idx++ ] += sample * lamp >> 8;
-			buf[ buf_idx++ ] += sample * ramp >> 8;
-			sidx += step;
 		}
 	}
 	chan->sample_idx = sidx;
+}
+
+/*
+	Returns a string containing version information.
+*/
+const char* micromod_get_version( void ) {
+	return MICROMOD_VERSION;
 }
 
 /*
@@ -502,8 +519,14 @@ long micromod_initialise( signed char *data, long sampling_rate ) {
 		inst->volume = volume > 64 ? 64 : volume;
 		loop_start = unsigned_short_big_endian( module_data, inst_idx * 30 + 16 ) * 2;
 		loop_length = unsigned_short_big_endian( module_data, inst_idx * 30 + 18 ) * 2;
-		if( loop_start + loop_length > sample_length )
-			loop_length = sample_length - loop_start;
+		if( loop_start + loop_length > sample_length ) {
+			if( loop_start / 2 + loop_length <= sample_length ) {
+				/* Some old modules have loop start in bytes. */
+				loop_start = loop_start / 2;
+			} else {
+				loop_length = sample_length - loop_start;
+			}
+		}
 		if( loop_length < 4 ) {
 			loop_start = sample_length;
 			loop_length = 0;
@@ -514,7 +537,8 @@ long micromod_initialise( signed char *data, long sampling_rate ) {
 		sample_data_offset += sample_length;
 	}
 	c2_rate = ( num_channels > 4 ) ? 8363 : 8287;
-	gain = ( num_channels > 4 ) ? 1 : 2;
+	gain = ( num_channels > 4 ) ? 32 : 64;
+	micromod_mute_channel( -1 );
 	micromod_set_position( 0 );
 	return 0;
 }
@@ -548,7 +572,7 @@ void micromod_get_string( long instrument, char *string ) {
 /*
 	Returns the total song duration in samples at the current sampling rate.
 */
-long micromod_calculate_song_duration() {
+long micromod_calculate_song_duration( void ) {
 	long duration, song_end;
 	duration = 0;
 	if( num_channels > 0 ) {
@@ -584,12 +608,38 @@ void micromod_set_position( long pos ) {
 		chan->instrument = chan->assigned = 0;
 		chan->volume = 0;
 		switch( chan_idx & 0x3 ) {
-			case 0: case 3: chan->panning =  51; break;
-			case 1: case 2: chan->panning = 204; break;
+			case 0: case 3: chan->panning = 0; break;
+			case 1: case 2: chan->panning = 127; break;
 		}
 	}
 	sequence_tick();
 	tick_offset = 0;
+}
+
+/*
+	Mute the specified channel.
+	If channel is negative, un-mute all channels.
+	Returns the number of channels.
+*/
+long micromod_mute_channel( long channel ) {
+	long chan_idx;
+	if( channel < 0 ) {
+		for( chan_idx = 0; chan_idx < num_channels; chan_idx++ ) {
+			channels[ chan_idx ].mute = 0;
+		}
+	} else if( channel < num_channels ) {
+		channels[ channel ].mute = 1;
+	}
+	return num_channels;
+}
+
+/*
+	Set the playback gain.
+	For 4-channel modules, a value of 64 can be used without distortion.
+	For 8-channel modules, a value of 32 or less is recommended.
+*/
+void micromod_set_gain( long value ) {
+	gain = value;
 }
 
 /*

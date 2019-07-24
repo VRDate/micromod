@@ -93,7 +93,15 @@ public class Module {
 				int param  = moduleData.uByte( moduleDataIdx + 3 );
 				if( param == 0 && ( effect < 3 || effect == 0xA ) ) effect = 0;
 				if( param == 0 && ( effect == 5 || effect == 6 ) ) effect -= 2;
-				if( effect == 8 && numChannels == 4 ) effect = param = 0;
+				if( effect == 8 ) {
+					if( numChannels == 4 ) {
+						effect = param = 0;
+					} else if( param > 128 ) {
+						param = 128;
+					} else {
+						param = ( param * 255 ) >> 7;
+					}
+				}
 				pattern.data[ patDataIdx + 3 ] = ( byte ) effect;
 				pattern.data[ patDataIdx + 4 ] = ( byte ) param;
 				moduleDataIdx += 4;
@@ -114,8 +122,14 @@ public class Module {
 			sample.panning = -1;
 			int loopStart = moduleData.ubeShort( instIdx * 30 + 16 ) * 2;
 			int loopLength = moduleData.ubeShort( instIdx * 30 + 18 ) * 2;
-			if( loopStart + loopLength > sampleLength )
-				loopLength = sampleLength - loopStart;
+			if( loopStart + loopLength > sampleLength ) {
+				if( loopStart / 2 + loopLength <= sampleLength ) {
+					/* Some old modules have loop start in bytes. */
+					loopStart = loopStart / 2;
+				} else {
+					loopLength = sampleLength - loopStart;
+				}
+			}
 			if( loopLength < 4 ) {
 				loopStart = sampleLength;
 				loopLength = 0;

@@ -198,15 +198,15 @@ public class AudioData {
 	}
 	
 	public void writeWav( OutputStream outputStream, boolean quantize ) throws IOException {
+		int frameSize = quantize ? 1 : 2;
 		writeChars( outputStream, "RIFF".toCharArray(), 4 );
-		writeInt( outputStream, sampleData.length * 2 + 36 ); // Wave chunk length.
+		writeInt( outputStream, sampleData.length * frameSize + 36 ); // Wave chunk length.
 		writeChars( outputStream, "WAVE".toCharArray(), 4 );
 		writeChars( outputStream, "fmt ".toCharArray(), 4 );
 		writeInt( outputStream, 16 ); // Format chunk length.
 		writeShort( outputStream, 1 ); // PCM format.
 		writeShort( outputStream, 1 ); // Mono.
 		writeInt( outputStream, sampleRate );
-		int frameSize = quantize ? 1 : 2;
 		writeInt( outputStream, sampleRate * frameSize ); // Bytes per sec.
 		writeShort( outputStream, frameSize ); // Frame size.
 		writeShort( outputStream, frameSize * 8 ); // Bits per sample.
@@ -230,40 +230,21 @@ public class AudioData {
 	}
 
 	public byte[] quantize() {
-		boolean noiseShaping = false;
-		for( int idx = 0; idx < sampleData.length; idx++ ) {
-			/* Determine whether source is already quantized. */
-			noiseShaping |= ( sampleData[ idx ] & 0xFF ) > 0;
-		}
 		byte[] outputBuf = new byte[ sampleData.length ];
-		if( noiseShaping ) {
-			int rand = 0, s1 = 0, s2 = 0, s3 = 0;
-			for( int idx = 0, end = sampleData.length; idx < end; idx++ ) {
-				// Convert to unsigned for proper integer rounding.
-				int in = sampleData[ idx ] + 32768;
-				// TPDF dither.
-				rand = ( rand * 65 + 17 ) & 0x7FFFFFFF;
-				int dither = rand >> 25;
-				rand = ( rand * 65 + 17 ) & 0x7FFFFFFF;
-				dither -= rand >> 25;
-				// "F-weighted" 3-tap noise shaping. Works well around 32khz.
-				in = in - ( s1 * 13 -s2 * 8 + s3 ) / 8 + dither;
-				s3 = s2;
-				s2 = s1;
-				// Rounding and quantization.
-				int out = ( in + ( in & 0x80 ) ) >> 8;
-				// Clipping.
-				if( out < 0 ) out = 0;
-				if( out > 255 ) out = 255;
-				// Feedback.
-				s1 = ( out << 8 ) - in;
-				outputBuf[ idx ] = ( byte ) ( out - 128 );
-			}
-		} else {
-			// No noise shaping or rounding, used when source is already 8 bit.
-			for( int idx = 0, end = sampleData.length; idx < end; idx++ ) {
-				outputBuf[ idx ] = ( byte ) ( sampleData[ idx ] >> 8 );
-			}
+		int qerror = 0;
+		for( int idx = 0, end = sampleData.length; idx < end; idx++ ) {
+			int ampl = sampleData[ idx ];
+			/* Dithering. */
+			ampl -= qerror;
+			qerror = ampl;
+			/* Rounding. */
+			ampl += ampl & 0x80;
+			ampl = ampl / 256;
+			qerror = ( ampl << 8 ) - qerror;
+			/* Clipping. */
+			if( ampl < -128 ) ampl = -128;
+			if( ampl > 127 ) ampl = 127;
+			outputBuf[ idx ] = ( byte ) ampl;
 		}
 		return outputBuf;
 	}

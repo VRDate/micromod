@@ -4,7 +4,7 @@
 
 #include "ibxm.h"
 
-const char *IBXM_VERSION = "ibxm/ac mod/xm/s3m replay 20170704 (c)mumart@gmail.com";
+const char *IBXM_VERSION = "ibxm/ac mod/xm/s3m replay 20190513 (c)mumart@gmail.com";
 
 static const int FP_SHIFT = 15, FP_ONE = 32768, FP_MASK = 32767;
 
@@ -87,13 +87,12 @@ static int log_2( int x ) {
 }
 
 static char* data_ascii( struct data *data, int offset, int length, char *dest ) {
-	int idx, end, chr;
+	int idx, chr;
 	memset( dest, 32, length );
 	if( offset > data->length ) {
 		offset = data->length;
 	}
-	end = offset + length;
-	if( end < 0 || end > data->length ) {
+	if( ( unsigned int ) offset + length > ( unsigned int ) data->length ) {
 		length = data->length - offset;
 	}
 	for( idx = 0; idx < length; idx++ ) {
@@ -788,8 +787,14 @@ static struct module* module_load_mod( struct data *data, char *message ) {
 				if( param == 0 && ( effect == 5 || effect == 6 ) ) {
 					effect -= 2;
 				}
-				if( effect == 8 && module->num_channels == 4 ) {
-					effect = param = 0;
+				if( effect == 8 ) {
+					if( module->num_channels == 4 ) {
+						effect = param = 0;
+					} else if( param > 128 ) {
+						param = 128;
+					} else {
+						param = ( param * 255 ) >> 7;
+					}
 				}
 				pattern_data[ pat_data_idx + 3 ] = effect;
 				pattern_data[ pat_data_idx + 4 ] = param;
@@ -829,7 +834,12 @@ static struct module* module_load_mod( struct data *data, char *message ) {
 			loop_start = data_u16be( data, ins * 30 + 16 ) * 2;
 			loop_length = data_u16be( data, ins * 30 + 18 ) * 2;
 			if( loop_start + loop_length > sample_length ) {
-				loop_length = sample_length - loop_start;
+				if( loop_start / 2 + loop_length <= sample_length ) {
+					/* Some old modules have loop start in bytes. */
+					loop_start = loop_start / 2;
+				} else {
+					loop_length = sample_length - loop_start;
+				}
 			}
 			if( loop_length < 4 ) {
 				loop_start = sample_length;
@@ -1428,7 +1438,7 @@ static void channel_row( struct channel *channel, struct note *note ) {
 			channel_tremolo( channel );
 			break;
 		case 0x08: /* Set Panning.*/
-			channel->panning = ( channel->note.param < 128 ) ? ( channel->note.param << 1 ) : 255;
+			channel->panning = channel->note.param & 0xFF;
 			break;
 		case 0x0A: case 0x84: /* Vol Slide. */
 			if( channel->note.param > 0 ) {
